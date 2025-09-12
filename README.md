@@ -14,7 +14,7 @@ Install from the Visual Studio Code Marketplace (COMING SOON) or use the provide
 
 1. Download the latest installer from: https://github.com/mhughson/mbh-chrdiffextension/releases
 2. Open the Extensions view in VS Code.
-3. Install the shipped VSIX: `Extensions: Install from VSIX...` and select `nes-chr-diff-viewer-0.0.2.vsix`.
+3. Install the shipped VSIX: `Extensions: Install from VSIX...` and select `nes-chr-diff-viewer-X.X.X.vsix`.
 
 ## Usage
 
@@ -52,4 +52,4 @@ Contributions are welcome. Please open issues or PRs on the project's GitHub rep
 
 ## License
 
-ISC
+[View LICENSE](./LICENSE)
