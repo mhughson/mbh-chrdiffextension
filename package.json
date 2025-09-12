@@ -63,7 +63,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mhughson/mbh-chrdiffextension.git"
+    "url": "https://github.com/mhughson/mbh-chrdiffextension.git"
   },
   "keywords": [
     "nes"
