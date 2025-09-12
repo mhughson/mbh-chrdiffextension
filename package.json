@@ -60,5 +60,18 @@
     "typescript": "^5.9.2",
     "@vscode/test-cli": "^0.0.11",
     "@vscode/test-electron": "^2.5.2"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mhughson/mbh-chrdiffextension.git"
+  },
+  "keywords": [
+    "nes"
+  ],
+  "author": "Matt Hughson",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/mhughson/mbh-chrdiffextension/issues"
+  },
+  "homepage": "https://github.com/mhughson/mbh-chrdiffextension#readme"
 }
