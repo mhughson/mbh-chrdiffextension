@@ -2,7 +2,7 @@
   "name": "nes-chr-diff-viewer",
   "displayName": "NES CHR Diff Viewer",
   "description": "Visual diffing for NES .chr binary image files in Git view, with before/after and pixel-difference previews using NES palette.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "engines": {
     "vscode": "^1.104.0"
   },
