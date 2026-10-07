@@ -10,13 +10,14 @@ export function activate(context: vscode.ExtensionContext) {
 	console.log('Congratulations, your extension "nes-chr-diff-viewer" is now active!');
 
 	// Register the custom diff provider for .chr files
-	const provider = new NESChrDiffProvider();
+	const provider = new NESChrDiffProvider(context.globalState);
+	context.subscriptions.push(provider);
 	context.subscriptions.push(
 		vscode.window.registerCustomEditorProvider(
 			'nes-chr-diff-viewer.chrDiff',
 			provider,
 			{
-				supportsMultipleEditorsPerDocument: false
+				supportsMultipleEditorsPerDocument: true
 			}
 		)
 	);
@@ -26,6 +27,10 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.window.showInformationMessage('Hello World from NES CHR Diff Viewer!');
 	});
 	context.subscriptions.push(disposable);
+	context.subscriptions.push(vscode.commands.registerCommand(
+		'nes-chr-diff-viewer.comparisonDiagnostics', () => provider.showComparisonDiagnostics()
+	));
+	return { getComparisonDiagnostics: () => provider.getComparisonDiagnostics() };
 }
 
 // This method is called when your extension is deactivated

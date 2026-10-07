@@ -20,6 +20,10 @@
       {
         "command": "nes-chr-diff-viewer.helloWorld",
         "title": "Hello World"
+      },
+      {
+        "command": "nes-chr-diff-viewer.comparisonDiagnostics",
+        "title": "NES CHR: Show Comparison Diagnostics"
       }
     ],
     "customEditors": [
