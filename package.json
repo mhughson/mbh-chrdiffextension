@@ -36,7 +36,46 @@
           }
         ]
       }
-    ]
+    ],
+    "configuration": {
+      "title": "NES CHR Diff Viewer",
+      "properties": {
+        "nes-chr-diff-viewer.palette": {
+          "type": "array",
+          "markdownDescription": "Colors used to draw CHR pixel values 0–3, as hex colors (`#rgb`, `#rrggbb` or `#rrggbbaa`).",
+          "items": {
+            "type": "string",
+            "pattern": "^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+            "patternErrorMessage": "Use a hex color such as #AAFFAA."
+          },
+          "minItems": 4,
+          "maxItems": 4,
+          "default": [
+            "#000000",
+            "#555555",
+            "#AAAAAA",
+            "#FFFFFF"
+          ]
+        },
+        "nes-chr-diff-viewer.changedPalette": {
+          "type": "array",
+          "markdownDescription": "Colors used for pixel values 0–3 of changed pixels when **Show changes** is on in a diff. Also colors the active toggle.",
+          "items": {
+            "type": "string",
+            "pattern": "^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+            "patternErrorMessage": "Use a hex color such as #AAFFAA."
+          },
+          "minItems": 4,
+          "maxItems": 4,
+          "default": [
+            "#004400",
+            "#008800",
+            "#55CC55",
+            "#AAFFAA"
+          ]
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",

@@ -1,7 +1,8 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { CHANGED_PALETTE, GREY_PALETTE, compareChr, findComparisonPartner, ViewerIdentity } from './chrComparison';
+import { compareChr, findComparisonPartner, ViewerIdentity } from './chrComparison';
+import { CONFIG_SECTION, Palettes, readPalettes } from './palette';
 
 class NESChrDocument implements vscode.CustomDocument {
     uri: vscode.Uri;
@@ -49,9 +50,27 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
     // One preference shared by every diff, so it carries over as the user moves between files.
     private showChanges: boolean;
     private outputChannel?: vscode.OutputChannel;
+    private readonly configSubscription: vscode.Disposable;
 
     constructor(private readonly preferences?: vscode.Memento) {
         this.showChanges = preferences?.get<boolean>(SHOW_CHANGES_KEY) === true;
+        this.configSubscription = vscode.workspace.onDidChangeConfiguration(event => {
+            if (event.affectsConfiguration(CONFIG_SECTION)) {
+                for (const view of this.viewers.values()) {
+                    if (view.ready) {
+                        this.postPalettes(view);
+                    }
+                }
+            }
+        });
+    }
+
+    private get palettes(): Palettes {
+        return readPalettes(vscode.workspace.getConfiguration(CONFIG_SECTION));
+    }
+
+    private postPalettes(view: Viewer): void {
+        void view.panel.webview.postMessage({ type: 'palette', ...this.palettes });
     }
 
     private get output(): vscode.OutputChannel {
@@ -59,6 +78,7 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
     }
 
     dispose(): void {
+        this.configSubscription.dispose();
         for (const view of this.viewers.values()) {
             view.subscriptions.forEach(subscription => subscription.dispose());
         }
@@ -206,7 +226,11 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
                     // A (re)created webview has no image yet, even if the file is unchanged.
                     view.ready = true;
                     view.displayed = false;
+                    // Settings may have changed between building the HTML and the script running.
+                    this.postPalettes(view);
                     await this.refreshVisible();
+                } else if (msg.type === 'openSettings') {
+                    await vscode.commands.executeCommand('workbench.action.openSettings', `${CONFIG_SECTION}.`);
                 } else if (msg.type === 'showChanges' && 'enabled' in msg && typeof msg.enabled === 'boolean') {
                     // Check the live pairing rather than view.partner, which may be
                     // briefly unset while either side is re-reading its file.
@@ -275,10 +299,7 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
     }
 
     private getHtml(): string {
-        // 16 tiles wide, 32 tiles high
-        const initialScale = 4;
-        const canvasWidth = 128 * initialScale;
-        const canvasHeight = 256 * initialScale;
+        const { palette, changedPalette } = this.palettes;
         function getNonce() {
             let text = '';
             const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -294,7 +315,18 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
                 <meta charset="UTF-8">
                 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
                 <style>
-                    .toolbar { display: flex; gap: 4px; margin-bottom: 8px; }
+                    html, body { height: 100%; }
+                    body {
+                        margin: 0; padding: 8px; box-sizing: border-box; overflow: hidden;
+                        display: flex; flex-direction: column;
+                    }
+                    .toolbar { display: flex; gap: 4px; margin-bottom: 8px; flex: none; }
+                    .separator { width: 1px; margin: 4px 2px; background: var(--vscode-widget-border, rgba(128,128,128,0.35)); }
+                    .spacer { flex: 1; }
+                    #viewport { flex: 1; min-height: 0; overflow: auto; scrollbar-gutter: stable; }
+                    #chrCanvas { display: block; margin: auto; border: 1px solid #888; cursor: zoom-in; }
+                    /* Grid + auto margins centers a small image but still scrolls fully when it is larger. */
+                    #viewport { display: grid; }
                     .icon-button {
                         display: inline-flex; align-items: center; justify-content: center;
                         width: 26px; height: 26px; padding: 0; box-sizing: border-box;
@@ -302,19 +334,25 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
                         color: var(--vscode-icon-foreground, currentColor); cursor: pointer;
                     }
                     .icon-button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.2)); }
-                    .icon-button:focus-within {
+                    .icon-button:focus-within, button.icon-button:focus-visible {
                         outline: 1px solid var(--vscode-focusBorder, #007fd4); outline-offset: -1px;
                     }
                     .icon-button svg { width: 16px; height: 16px; fill: currentColor; }
+                    /* The current zoom mode is shown as a solid, theme-colored button. */
+                    .icon-button.active, .icon-button.active:hover {
+                        background: var(--vscode-button-background, #0e639c);
+                        border-color: var(--vscode-focusBorder, #007fd4);
+                        color: var(--vscode-button-foreground, #FFFFFF);
+                    }
                     .toggle { position: relative; }
                     .toggle[hidden] { display: none; }
                     .toggle input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: inherit; }
-                    /* Solid green when active so the state is obvious and matches the highlight colors. */
+                    /* Uses the changed-pixel colors so the active state matches the highlighting. */
                     .toggle:has(input:checked), .toggle:has(input:checked):hover {
-                        background: ${CHANGED_PALETTE[1]};
-                        border-color: ${CHANGED_PALETTE[2]};
+                        background: var(--changed-background);
+                        border-color: var(--changed-border);
                         color: #FFFFFF;
-                        box-shadow: 0 0 6px ${CHANGED_PALETTE[2]};
+                        box-shadow: 0 0 6px var(--changed-border);
                     }
                     .toggle:has(input:disabled) { opacity: 0.4; cursor: default; }
                     .visually-hidden {
@@ -325,22 +363,38 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
             </head>
             <body>
                 <div class="toolbar">
+                    <button id="zoomFit" class="icon-button active" title="Zoom to fit" aria-label="Zoom to fit" aria-pressed="true">
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2v4H2M10 2v4h4M14 10h-4v4M2 10h4v4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+                    </button>
+                    <button id="zoomFill" class="icon-button" title="Zoom to fill" aria-label="Zoom to fill" aria-pressed="false">
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+                    </button>
+                    <span class="separator" aria-hidden="true"></span>
                     <label id="showChangesLabel" class="icon-button toggle" title="Show changes" hidden>
                         <input id="showChanges" type="checkbox" disabled aria-label="Show changes">
                         <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.75" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 2.25a5.75 5.75 0 0 0 0 11.5z"/></svg>
                     </label>
+                    <span class="spacer"></span>
+                    <button id="openSettings" class="icon-button" title="Configure colors" aria-label="Configure colors">
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-dasharray="2.2 2.2"/><circle cx="8" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+                    </button>
                     <span id="comparisonStatus" class="visually-hidden" role="status">Preview: waiting for viewer.</span>
                 </div>
-                <canvas id="chrCanvas" width="${canvasWidth}" height="${canvasHeight}" style="border:1px solid #888; cursor:zoom-in;"></canvas>
+                <div id="viewport">
+                    <canvas id="chrCanvas" width="128" height="256"></canvas>
+                </div>
                 <script nonce="${nonce}">
-                    const nesPalette = ${JSON.stringify(GREY_PALETTE)};
-                    const changedPalette = ${JSON.stringify(CHANGED_PALETTE)};
+                    let nesPalette = ${JSON.stringify(palette)};
+                    let changedPalette = ${JSON.stringify(changedPalette)};
                     let changedMask = [];
                     let showChanges = false;
                     let toggleRequest = 0;
                     const changesToggle = document.getElementById('showChanges');
                     const status = document.getElementById('comparisonStatus');
                     const changesLabel = document.getElementById('showChangesLabel');
+                    const viewport = document.getElementById('viewport');
+                    const fitButton = document.getElementById('zoomFit');
+                    const fillButton = document.getElementById('zoomFill');
                     // The toolbar is icon-only; the status lives in the toggle's tooltip and
                     // in a visually hidden live region for screen readers.
                     function setStatus(text) {
@@ -352,16 +406,46 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
                         changesToggle.disabled = !available;
                         changesLabel.hidden = !available;
                     }
+                    function applyPalettes(palette, changed) {
+                        nesPalette = palette;
+                        changedPalette = changed;
+                        document.documentElement.style.setProperty('--changed-background', changed[1]);
+                        document.documentElement.style.setProperty('--changed-border', changed[2]);
+                    }
+                    applyPalettes(nesPalette, changedPalette);
 
                     // Allocate a default buffer for 16x32 tiles (512 tiles * 16 bytes = 8192 bytes)
                     const CHR_SIZE = 16 * 32 * 16;
                     const chr = new Uint8Array(CHR_SIZE);
                     let hasData = false;
-                    let scale = ${initialScale};
-                    const minScale = 1;
+                    const minScale = 0.25;
                     const maxScale = 32;
+                    // 'fit' and 'fill' track the panel size; wheel zoom switches to 'manual'.
+                    let zoomMode = 'fit';
+                    let scale = 1;
                     const canvas = document.getElementById('chrCanvas');
                     const ctx = canvas.getContext('2d');
+
+                    function clampScale(value) {
+                        return Math.min(maxScale, Math.max(minScale, value));
+                    }
+                    function modeScale(mode) {
+                        // Leave room for the 1px canvas border on each side.
+                        const width = Math.max(0, viewport.clientWidth - 2) / 128;
+                        const height = Math.max(0, viewport.clientHeight - 2) / 256;
+                        return clampScale(mode === 'fill' ? Math.max(width, height) : Math.min(width, height));
+                    }
+                    function setZoomMode(mode) {
+                        zoomMode = mode;
+                        for (const [button, buttonMode] of [[fitButton, 'fit'], [fillButton, 'fill']]) {
+                            button.classList.toggle('active', mode === buttonMode);
+                            button.setAttribute('aria-pressed', String(mode === buttonMode));
+                        }
+                        if (mode !== 'manual') {
+                            scale = modeScale(mode);
+                        }
+                        drawCHR();
+                    }
 
                     function loadData(arr) {
                         arr = arr || [];
@@ -373,13 +457,19 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
                     }
 
                     function drawCHR() {
+                        canvas.width = Math.floor(128 * scale);
+                        canvas.height = Math.floor(256 * scale);
                         if (!hasData) {
                             // nothing to draw yet
                             return;
                         }
-                        canvas.width = 128 * scale;
-                        canvas.height = 256 * scale;
                         ctx.clearRect(0, 0, canvas.width, canvas.height);
+                        // Pixel edges are snapped to whole device pixels so fractional zoom
+                        // levels stay crisp without seams between NES pixels.
+                        const edges = [];
+                        for (let i = 0; i <= 256; i++) {
+                            edges.push(Math.round(i * scale));
+                        }
                         for (let tileY = 0; tileY < 32; tileY++) {
                             for (let tileX = 0; tileX < 16; tileX++) {
                                 const tileIndex = tileY * 16 + tileX;
@@ -387,17 +477,15 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
                                 for (let row = 0; row < 8; row++) {
                                     const plane0 = chr[tileOffset + row] || 0;
                                     const plane1 = chr[tileOffset + row + 8] || 0;
+                                    const y = tileY * 8 + row;
                                     for (let col = 0; col < 8; col++) {
                                         const bit0 = (plane0 >> (7 - col)) & 1;
                                         const bit1 = (plane1 >> (7 - col)) & 1;
                                         const colorIndex = (bit1 << 1) | bit0;
-                                        const pixel = (tileY * 8 + row) * 128 + tileX * 8 + col;
+                                        const x = tileX * 8 + col;
+                                        const pixel = y * 128 + x;
                                         ctx.fillStyle = (showChanges && changedMask[pixel] ? changedPalette : nesPalette)[colorIndex];
-                                        ctx.fillRect(
-                                            (tileX * 8 + col) * scale,
-                                            (tileY * 8 + row) * scale,
-                                            scale, scale
-                                        );
+                                        ctx.fillRect(edges[x], edges[y], edges[x + 1] - edges[x], edges[y + 1] - edges[y]);
                                     }
                                 }
                             }
@@ -425,44 +513,108 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
                             setAvailable(msg.available);
                             setStatus(msg.status);
                             drawCHR();
+                        } else if (msg.type === 'palette') {
+                            applyPalettes(msg.palette, msg.changedPalette);
+                            drawCHR();
                         } else if (msg.type === 'error' || msg.type === 'deleted') {
-                            // Clear buffer
-                            for (let i = 0; i < CHR_SIZE; i++) chr[i] = 0;
+                            chr.fill(0);
                             hasData = false;
                             changedMask = [];
                             showChanges = false;
                             setAvailable(false);
                             setStatus(msg.message || 'File deleted.');
-                            // clear canvas
-                            canvas.width = 128 * scale;
-                            canvas.height = 256 * scale;
-                            ctx.clearRect(0, 0, canvas.width, canvas.height);
                             drawCHR();
+                            ctx.clearRect(0, 0, canvas.width, canvas.height);
                         }
                     });
 
-                    // Notify the extension that the webview HTML is ready to receive messages
                     const vscode = acquireVsCodeApi();
                     changesToggle.addEventListener('change', () => {
                         showChanges = changesToggle.checked;
                         drawCHR();
                         vscode.postMessage({ type: 'showChanges', enabled: changesToggle.checked, request: ++toggleRequest });
                     });
+                    fitButton.addEventListener('click', () => setZoomMode('fit'));
+                    fillButton.addEventListener('click', () => setZoomMode('fill'));
+                    document.getElementById('openSettings').addEventListener('click', () => {
+                        vscode.postMessage({ type: 'openSettings' });
+                    });
+                    window.addEventListener('resize', () => {
+                        if (zoomMode !== 'manual') {
+                            setZoomMode(zoomMode);
+                        }
+                    });
+                    setZoomMode('fit');
                     // Post a 'ready' message on next tick so the handler above is registered
                     setTimeout(() => vscode.postMessage({ type: 'ready' }), 0);
 
-                    // Smooth zoom on mouse wheel
-                    canvas.addEventListener('wheel', function(e) {
+                    // Mouse model: click zooms in, Alt+click zooms out, the wheel scrolls and
+                    // Alt+wheel zooms. Everything zooms toward the mouse.
+                    const clickZoomFactor = 2;
+                    const wheelZoomFactor = 1.1;
+                    let altUsed = false;
+
+                    // Key events only reach this page while it has keyboard focus, so every
+                    // mouse event also refreshes the Alt state the cursor depends on.
+                    function setAlt(down) {
+                        canvas.style.cursor = down ? 'zoom-out' : 'zoom-in';
+                    }
+                    // Keeps the image point under the mouse in place while the scale changes.
+                    function zoomAt(newScale, clientX, clientY) {
+                        const before = canvas.getBoundingClientRect();
+                        const imageX = (clientX - before.left - 1) / scale;
+                        const imageY = (clientY - before.top - 1) / scale;
+                        scale = clampScale(newScale);
+                        setZoomMode('manual');
+                        const after = canvas.getBoundingClientRect();
+                        viewport.scrollLeft += after.left + 1 + imageX * scale - clientX;
+                        viewport.scrollTop += after.top + 1 + imageY * scale - clientY;
+                    }
+
+                    canvas.addEventListener('pointerdown', (e) => {
+                        setAlt(e.altKey);
+                        if (e.button !== 0) return;
                         e.preventDefault();
-                        // Use exponential scaling for smoothness
-                        const zoomFactor = 1.1;
-                        if (e.deltaY < 0) {
-                            scale = Math.min(maxScale, scale * zoomFactor);
-                        } else {
-                            scale = Math.max(minScale, scale / zoomFactor);
+                        altUsed = altUsed || e.altKey;
+                        zoomAt(e.altKey ? scale / clickZoomFactor : scale * clickZoomFactor, e.clientX, e.clientY);
+                    });
+                    viewport.addEventListener('pointerover', (e) => setAlt(e.altKey));
+                    viewport.addEventListener('pointermove', (e) => setAlt(e.altKey));
+                    viewport.addEventListener('wheel', (e) => {
+                        setAlt(e.altKey);
+                        // A plain wheel scrolls the viewport normally.
+                        if (!e.altKey) return;
+                        e.preventDefault();
+                        altUsed = true;
+                        // Some systems report Alt+wheel as horizontal scrolling.
+                        const delta = e.deltaY || e.deltaX;
+                        if (delta) {
+                            zoomAt(delta < 0 ? scale * wheelZoomFactor : scale / wheelZoomFactor, e.clientX, e.clientY);
                         }
-                        drawCHR();
                     }, { passive: false });
+
+                    // Capture phase, so these run before VS Code forwards keys to the workbench.
+                    window.addEventListener('keydown', (e) => {
+                        if (e.key === 'Alt') {
+                            if (!e.repeat) {
+                                altUsed = false;
+                            }
+                            setAlt(true);
+                        }
+                    }, true);
+                    window.addEventListener('keyup', (e) => {
+                        if (e.key === 'Alt') {
+                            setAlt(false);
+                            if (altUsed) {
+                                // VS Code cannot see the click or wheel, so a forwarded Alt release
+                                // would look like a lone Alt press and focus the menu bar.
+                                altUsed = false;
+                                e.stopPropagation();
+                            }
+                        }
+                    }, true);
+                    window.addEventListener('blur', () => setAlt(false));
+                    setAlt(false);
                 </script>
             </body>
             </html>

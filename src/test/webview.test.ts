@@ -22,7 +22,11 @@ suite('Actual webview rendering script', () => {
             const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(panel.webview.html)?.[1];
             assert.ok(script, 'Use the production script, not a copy of the rendering logic.');
             const painted = new Map<string, string>();
-            const canvasEvents = new Map<string, (event: { deltaY: number; preventDefault(): void }) => void>();
+            type InputEvent = Partial<{ deltaX: number; deltaY: number; ctrlKey: boolean; altKey: boolean; button: number;
+                key: string; clientX: number; clientY: number; data: object }>;
+            type Handler = (event: InputEvent & { preventDefault(): void; stopPropagation(): void }) => void;
+            const canvasEvents = new Map<string, Handler>();
+            const viewportEvents = new Map<string, Handler>();
             const context = {
                 fillStyle: '',
                 clearRect() { painted.clear(); },
@@ -31,12 +35,45 @@ suite('Actual webview rendering script', () => {
             const canvas = {
                 width: 512, height: 1024,
                 getContext: () => context,
-                addEventListener: (name: string, callback: (event: { deltaY: number; preventDefault(): void }) => void) =>
-                    canvasEvents.set(name, callback)
+                style: { cursor: '' },
+                // The canvas sits at (10, 40) in the panel, moved by the viewport scroll.
+                getBoundingClientRect: () => ({ left: 10 - viewport.scrollLeft, top: 40 - viewport.scrollTop }),
+                addEventListener: (name: string, callback: Handler) => canvasEvents.set(name, callback)
             };
             const status = { textContent: '' };
             const toggleLabel = { title: '', hidden: true };
-            const button = { addEventListener() {} };
+            const viewport = {
+                clientWidth: 514, clientHeight: 1026, scrollLeft: 0, scrollTop: 0,
+                addEventListener: (name: string, callback: Handler) => viewportEvents.set(name, callback)
+            };
+            // Dispatches like the browser: canvas listeners first, then the viewport (bubbling).
+            const fire = (target: 'canvas' | 'viewport' | 'window', name: string, event: InputEvent = {}) => {
+                const result = { prevented: false, stopped: false };
+                const full = {
+                    ...event, preventDefault() { result.prevented = true; }, stopPropagation() { result.stopped = true; }
+                };
+                if (target === 'canvas') {
+                    canvasEvents.get(name)?.(full);
+                }
+                (target === 'window' ? windowEvents : viewportEvents).get(name)?.(full);
+                return result;
+            };
+            const makeButton = () => {
+                const classes = new Set<string>();
+                const attributes = new Map<string, string>();
+                let click: (() => void) | undefined;
+                return {
+                    classes, attributes, click: () => click?.(),
+                    classList: { toggle: (name: string, on: boolean) => on ? classes.add(name) : classes.delete(name) },
+                    setAttribute: (name: string, value: string) => attributes.set(name, value),
+                    addEventListener: (name: string, callback: () => void) => { click = callback; }
+                };
+            };
+            const fitButton = makeButton();
+            const fillButton = makeButton();
+            const settingsButton = makeButton();
+            const cssVariables = new Map<string, string>();
+            const windowEvents = new Map<string, Handler>();
             let toggleChanged: (() => void) | undefined;
             const toggle = {
                 checked: false, disabled: true,
@@ -46,17 +83,34 @@ suite('Actual webview rendering script', () => {
             let receive: ((event: { data: object }) => void) | undefined;
             vm.runInNewContext(script, {
                 document: {
-                    getElementById: (id: string) => id === 'chrCanvas' ? canvas :
-                        id === 'comparisonStatus' ? status : id === 'showChanges' ? toggle :
-                        id === 'showChangesLabel' ? toggleLabel : button
+                    getElementById: (id: string) => ({
+                        chrCanvas: canvas, comparisonStatus: status, showChanges: toggle,
+                        showChangesLabel: toggleLabel, viewport, zoomFit: fitButton, zoomFill: fillButton,
+                        openSettings: settingsButton
+                    } as Record<string, unknown>)[id],
+                    documentElement: { style: { setProperty: (name: string, value: string) => cssVariables.set(name, value) } }
                 },
                 window: {
-                    addEventListener: (name: string, callback: (event: { data: object }) => void) => { receive = callback; }
+                    addEventListener: (name: string, callback: Handler) => {
+                        windowEvents.set(name, callback);
+                        if (name === 'message') {
+                            receive = callback as (event: { data: object }) => void;
+                        }
+                    }
                 },
                 acquireVsCodeApi: () => ({ postMessage(message: object) { messages.push(message); } }),
                 setTimeout() {}
             });
             assert.ok(receive);
+            assert.strictEqual(canvas.width, 512, 'Zoom to fit is the default.');
+            assert.strictEqual(canvas.height, 1024);
+            assert.ok(fitButton.classes.has('active'));
+            assert.strictEqual(fitButton.attributes.get('aria-pressed'), 'true');
+            assert.strictEqual(fillButton.attributes.get('aria-pressed'), 'false');
+            assert.strictEqual(cssVariables.get('--changed-background'), CHANGED_PALETTE[1]);
+            assert.strictEqual(cssVariables.get('--changed-border'), CHANGED_PALETTE[2]);
+            settingsButton.click();
+            assert.strictEqual(JSON.stringify(messages.pop()), JSON.stringify({ type: 'openSettings' }));
             const send = (data: object) => receive?.({ data });
             const original = new Uint8Array(32);
             original[0] = 0b10110000;
@@ -99,13 +153,23 @@ suite('Actual webview rendering script', () => {
 
             send({ ...comparisonMessage, showChanges: true, toggleRequest: 1, data: Array.from(modified) });
             assert.strictEqual(painted.get('0,0'), CHANGED_PALETTE[0], 'Changes to black remain visibly green.');
-            let prevented = false;
-            canvasEvents.get('wheel')?.({ deltaY: -1, preventDefault() { prevented = true; } });
-            assert.ok(prevented);
-            assert.ok(canvas.width > 512);
+            assert.ok(!fire('canvas', 'wheel', { deltaY: -1, clientX: 51, clientY: 121 }).prevented, 'A plain wheel scrolls.');
+            assert.strictEqual(canvas.width, 512);
+            assert.ok(!fire('canvas', 'wheel', { deltaY: -1, ctrlKey: true, clientX: 51, clientY: 121 }).prevented);
+            assert.strictEqual(canvas.width, 512, 'Ctrl+wheel is not a zoom gesture.');
+            assert.ok(fire('canvas', 'wheel', { deltaY: -1, altKey: true, clientX: 51, clientY: 121 }).prevented);
+            assert.strictEqual(canvas.width, 563, 'Alt+wheel zooms in by 10%.');
+            assert.strictEqual(canvas.style.cursor, 'zoom-out', 'Alt state is read from the wheel event.');
+            // Image pixel (10, 20) was under the mouse at scale 4 and stays there at scale 4.4.
+            assert.ok(Math.abs(viewport.scrollLeft - (11 + 10 * 4.4 - 51)) < 1e-9);
+            assert.ok(Math.abs(viewport.scrollTop - (41 + 20 * 4.4 - 121)) < 1e-9);
             assert.strictEqual(painted.get('0,0'), CHANGED_PALETTE[0]);
-            assert.strictEqual(painted.get('4.4,0'), CHANGED_PALETTE[0], 'Highlighting scales with pixels.');
+            assert.strictEqual(painted.get('4,0'), CHANGED_PALETTE[0], 'Highlighting scales with pixels.');
+            assert.ok(!fitButton.classes.has('active') && !fillButton.classes.has('active'), 'Wheel zoom is manual.');
             const zoomedWidth = canvas.width;
+            viewport.clientWidth = 258;
+            fire('window', 'resize');
+            assert.strictEqual(canvas.width, zoomedWidth, 'Resizing keeps a manual zoom.');
             send({ ...comparisonMessage, showChanges: false, toggleRequest: 1 });
             assert.ok([...painted.values()].every(color => GREY_PALETTE.includes(color)));
             assert.strictEqual(toggle.checked, false);
@@ -116,6 +180,81 @@ suite('Actual webview rendering script', () => {
                 'Unavailable comparison never highlights pixels.');
             assert.strictEqual(painted.get('0,0'), GREY_PALETTE[0]);
             assert.strictEqual(canvas.width, zoomedWidth, 'Comparison updates do not reset zoom.');
+
+            send({ type: 'update', data: Array.from(original) });
+            fitButton.click();
+            assert.strictEqual(canvas.width, 256, 'Fit uses the smaller axis (width here).');
+            assert.strictEqual(canvas.height, 512);
+            assert.ok(fitButton.classes.has('active'));
+            fillButton.click();
+            assert.strictEqual(canvas.width, 512, 'Fill uses the larger axis (height here).');
+            assert.strictEqual(canvas.height, 1024);
+            assert.ok(fillButton.classes.has('active') && !fitButton.classes.has('active'));
+            assert.strictEqual(fillButton.attributes.get('aria-pressed'), 'true');
+            viewport.clientWidth = 514;
+            viewport.clientHeight = 514;
+            fire('window', 'resize');
+            assert.strictEqual(canvas.width, 512, 'Fill follows the panel size.');
+            fitButton.click();
+            assert.strictEqual(canvas.width, 256);
+            assert.strictEqual(painted.get('2,0'), GREY_PALETTE[2], 'Fractional zoom keeps whole-pixel edges.');
+            viewport.clientWidth = 514;
+            viewport.clientHeight = 1026;
+            fire('window', 'resize');
+            assert.strictEqual(canvas.width, 512, 'Fit follows the panel size.');
+
+            viewport.scrollLeft = 0;
+            viewport.scrollTop = 0;
+            const imagePoint = (x: number, y: number) => {
+                const rect = canvas.getBoundingClientRect();
+                return [(x - rect.left - 1) / (canvas.width / 128), (y - rect.top - 1) / (canvas.height / 256)];
+            };
+            fire('viewport', 'pointermove', { altKey: false, clientX: 51, clientY: 121 });
+            assert.strictEqual(canvas.style.cursor, 'zoom-in');
+            assert.ok(fire('canvas', 'pointerdown', { button: 0, clientX: 51, clientY: 121 }).prevented);
+            assert.strictEqual(canvas.width, 1024, 'Click zooms in.');
+            assert.deepStrictEqual(imagePoint(51, 121), [10, 20], 'The clicked pixel stays under the mouse.');
+            assert.ok(!fitButton.classes.has('active'), 'Click zoom is manual.');
+            fire('canvas', 'pointerdown', { button: 2, clientX: 51, clientY: 121 });
+            assert.strictEqual(canvas.width, 1024, 'Only the left button zooms.');
+            fire('window', 'keydown', { key: 'Alt' });
+            assert.strictEqual(canvas.style.cursor, 'zoom-out');
+            fire('canvas', 'pointerdown', { button: 0, altKey: true, clientX: 51, clientY: 121 });
+            assert.strictEqual(canvas.width, 512, 'Alt+click zooms out.');
+            assert.deepStrictEqual(imagePoint(51, 121), [10, 20]);
+            assert.ok(fire('window', 'keyup', { key: 'Alt' }).stopped,
+                'The Alt release ending an Alt+click is not forwarded, so it cannot focus the menu bar.');
+            assert.strictEqual(canvas.style.cursor, 'zoom-in');
+            fire('window', 'keydown', { key: 'Alt' });
+            assert.ok(!fire('window', 'keyup', { key: 'Alt' }).stopped, 'A lone Alt press still reaches VS Code.');
+            fire('viewport', 'pointermove', { altKey: true, clientX: 51, clientY: 121 });
+            assert.strictEqual(canvas.style.cursor, 'zoom-out', 'Alt held before entering the panel is detected.');
+            fire('viewport', 'pointermove', { altKey: false, clientX: 51, clientY: 121 });
+            assert.strictEqual(canvas.style.cursor, 'zoom-in');
+
+            fire('window', 'keydown', { key: 'Alt' });
+            fire('canvas', 'wheel', { deltaY: 1, altKey: true, clientX: 51, clientY: 121 });
+            assert.strictEqual(canvas.width, 465, 'Alt+wheel down zooms out.');
+            assert.ok(fire('window', 'keyup', { key: 'Alt' }).stopped, 'Alt+wheel does not focus the menu bar either.');
+            fire('canvas', 'wheel', { deltaX: -1, altKey: true, clientX: 51, clientY: 121 });
+            assert.strictEqual(canvas.width, 512, 'Alt+wheel reported as horizontal scrolling still zooms.');
+            fire('viewport', 'pointerover', { altKey: true });
+            assert.strictEqual(canvas.style.cursor, 'zoom-out', 'Entering with Alt held shows the zoom-out cursor.');
+            fire('window', 'blur');
+            assert.strictEqual(canvas.style.cursor, 'zoom-in', 'Losing focus forgets Alt.');
+            fire('window', 'keydown', { key: ' ' });
+            assert.strictEqual(canvas.style.cursor, 'zoom-in', 'Space has no special meaning.');
+            const customPalette = ['#112233', '#445566', '#778899', '#AABBCC'];
+            const customChanged = ['#330000', '#660000', '#990000', '#CC0000'];
+            send({ type: 'palette', palette: customPalette, changedPalette: customChanged });
+            assert.strictEqual(painted.get('0,0'), customPalette[3], 'Palette changes repaint immediately.');
+            assert.strictEqual(cssVariables.get('--changed-background'), customChanged[1]);
+            assert.strictEqual(cssVariables.get('--changed-border'), customChanged[2]);
+            send({ ...comparisonMessage, showChanges: true, toggleRequest: 1 });
+            assert.strictEqual(painted.get('0,0'), customChanged[3]);
+            assert.strictEqual(painted.get('16,0'), customPalette[0]);
+            send({ type: 'palette', palette: GREY_PALETTE, changedPalette: CHANGED_PALETTE });
+            send({ type: 'comparison', mask: [], status: 'Preview', available: false, showChanges: true, toggleRequest: 1 });
 
             send({ type: 'update', data: Array.from(original) });
             send({ type: 'update', data: Array.from(new Uint8Array(16)) });
@@ -129,6 +268,70 @@ suite('Actual webview rendering script', () => {
             send({ type: 'update', data: Array.from(original) });
             assert.strictEqual(painted.get('0,0'), GREY_PALETTE[3], 'Recovery does not retain the old mask.');
         } finally {
+            panel.dispose();
+            provider.dispose();
+            cancellation.dispose();
+            await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        }
+    });
+
+    test('color settings reach open viewers and invalid values fall back to defaults', async () => {
+        const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'chr-palette-test-'));
+        const uri = vscode.Uri.file(path.join(directory, 'fixture.chr'));
+        const provider = new NESChrDiffProvider();
+        const cancellation = new vscode.CancellationTokenSource();
+        const panel = vscode.window.createWebviewPanel('chr-palette-test', 'CHR palette test', vscode.ViewColumn.One, {});
+        const emitter = new vscode.EventEmitter<unknown>();
+        const config = vscode.workspace.getConfiguration('nes-chr-diff-viewer');
+        const received: { type: string; palette?: string[]; changedPalette?: string[] }[] = [];
+        const webview = new Proxy(panel.webview, {
+            get(target, property) {
+                if (property === 'onDidReceiveMessage') {
+                    return emitter.event;
+                }
+                if (property === 'postMessage') {
+                    return (message: { type: string }) => { received.push(message); return Promise.resolve(true); };
+                }
+                const value = Reflect.get(target, property, target);
+                return typeof value === 'function' ? value.bind(target) : value;
+            },
+            set: (target, property, value) => Reflect.set(target, property, value, target)
+        });
+        const wrapper = new Proxy(panel, {
+            get(target, property) {
+                if (property === 'webview') {
+                    return webview;
+                }
+                const value = Reflect.get(target, property, target);
+                return typeof value === 'function' ? value.bind(target) : value;
+            }
+        });
+        const lastPalette = () => [...received].reverse().find(message => message.type === 'palette');
+        const waitForPalette = async (expected: string[]) => {
+            for (let attempt = 0; attempt < 100 && JSON.stringify(lastPalette()?.palette) !== JSON.stringify(expected); attempt++) {
+                await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            assert.deepStrictEqual(lastPalette()?.palette, expected);
+        };
+        try {
+            await fs.writeFile(uri.fsPath, new Uint8Array(8192));
+            const document = await provider.openCustomDocument(uri,
+                { backupId: undefined, untitledDocumentData: undefined }, cancellation.token);
+            await provider.resolveCustomEditor(document, wrapper, cancellation.token);
+            assert.ok(panel.webview.html.includes(JSON.stringify(GREY_PALETTE)), 'Defaults are embedded in the page.');
+            emitter.fire({ type: 'ready' });
+            assert.deepStrictEqual(lastPalette(), { type: 'palette', palette: GREY_PALETTE, changedPalette: CHANGED_PALETTE });
+
+            const custom = ['#123', '#456789', '#abcdef', '#ABCDEF80'];
+            await config.update('palette', custom, vscode.ConfigurationTarget.Global);
+            await waitForPalette(custom);
+            assert.deepStrictEqual(lastPalette()?.changedPalette, CHANGED_PALETTE);
+
+            await config.update('palette', ['#000000', 'red;</script>', '#AAAAAA', '#FFFFFF'], vscode.ConfigurationTarget.Global);
+            await waitForPalette(GREY_PALETTE);
+        } finally {
+            await config.update('palette', undefined, vscode.ConfigurationTarget.Global);
+            emitter.dispose();
             panel.dispose();
             provider.dispose();
             cancellation.dispose();
