@@ -6,6 +6,7 @@ NES CHR Diff Viewer is a Visual Studio Code extension that provides a visual pre
 
 - Visual preview for `*.chr` files rendered as NES tiles using a grayscale palette.
 - Side-by-side diff view for CHR files in Source Control (shows before and after states).
+- Diff Highlight: shows areas of CHR file that have changed.
 - Live update: the viewer refreshes when the underlying file changes on disk.
 
 ## Installation
@@ -24,13 +25,17 @@ Install from the Visual Studio Code Marketplace (COMING SOON) or use the provide
 
 ## Screenshots
 
-Viewer:
+### Viewer:
 
-![CHR Viewer](assets/screenshots/viewer_screenshot.png)
+<img width="957" height="801" alt="image" src="https://github.com/user-attachments/assets/6019235d-3781-4edc-85d8-0c34ef586219" />
 
-Diff view (before / after):
+### Diff View (w/difference highlight active):
 
-![CHR Diff Viewer](assets/screenshots/diff_screenshot.png)
+<img width="957" height="801" alt="image" src="https://github.com/user-attachments/assets/59ab5d01-d380-4794-b7c6-dc31438d2629" />
+
+### Diff View (standard):
+
+<img width="957" height="801" alt="image" src="https://github.com/user-attachments/assets/04bac117-7cf8-4b1a-aa87-0de692db3886" />
 
 ## Development
 
@@ -41,7 +46,7 @@ npm install
 npm run compile
 ```
 
-To run the extension in the Extension Development Host, press F5 in VS Code.
+To run the extension in the Extension Development Host, press F5 in VS Code. This will open a new instance of VSCode with the extension enabled. You can then open a folder for a project to test out the functionality.
 
 ## Contributing
 
