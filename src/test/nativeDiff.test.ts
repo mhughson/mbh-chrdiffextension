@@ -238,7 +238,7 @@ suite('Native VS Code Git diff integration', function () {
         assert.ok(api.getComparisonDiagnostics().every(view => view.partner === undefined && view.changedPixels === 0));
     });
 
-    test('Show changes is one remembered preference shared by every detected diff', async () => {
+    test('Show changes and 8x16 mode are remembered preferences shared by viewers', async () => {
         await stageTwoPixels();
         const stored = new Map<string, unknown>();
         const memento: vscode.Memento = {
@@ -250,7 +250,9 @@ suite('Native VS Code Git diff integration', function () {
         const cancellation = new vscode.CancellationTokenSource();
         const panels: vscode.WebviewPanel[] = [];
         const emitters: vscode.EventEmitter<unknown>[] = [];
-        const messages: { showChanges?: boolean; available?: boolean }[][] = [];
+        type ViewerMessage = { type?: string; showChanges?: boolean; available?: boolean; enabled?: boolean; request?: number };
+        const messages: ViewerMessage[][] = [];
+        const latestSpriteModes = () => messages.map(list => list.filter(message => message.type === 'spriteMode').at(-1));
         // Intercept only the message transport and visibility/group metadata.
         // Production broker and real Git reads still run unchanged.
         const openViewer = async (index: number, column: number) => {
@@ -259,7 +261,7 @@ suite('Native VS Code Git diff integration', function () {
             panels.push(panel);
             const emitter = new vscode.EventEmitter<unknown>();
             emitters.push(emitter);
-            const received: { showChanges?: boolean; available?: boolean }[] = [];
+            const received: ViewerMessage[] = [];
             messages.push(received);
             const webview = new Proxy(panel.webview, {
                 get(target, property) {
@@ -267,7 +269,7 @@ suite('Native VS Code Git diff integration', function () {
                         return emitter.event;
                     }
                     if (property === 'postMessage') {
-                        return (message: { showChanges?: boolean; available?: boolean }) => {
+                        return (message: ViewerMessage) => {
                             received.push(message);
                             return Promise.resolve(true);
                         };
@@ -308,6 +310,11 @@ suite('Native VS Code Git diff integration', function () {
                 await openViewer(index, index < 2 ? 1 : 2);
             }
             await settled();
+            assert.ok(latestSpriteModes().every(message => message?.enabled === false), '8x8 is the default.');
+            emitters[0].fire({ type: 'spriteMode', enabled: true, request: 1 });
+            assert.ok(latestSpriteModes().every(message => message?.enabled === true), 'Both sides of every diff switch together.');
+            assert.strictEqual(latestSpriteModes()[0]?.request, 1);
+            assert.strictEqual(stored.get('nes-chr-diff-viewer.spriteMode'), true);
             assert.ok(provider.getComparisonDiagnostics().every(view => !view.showChanges), 'Off by default.');
             emitters[0].fire({ type: 'showChanges', enabled: true });
             assert.deepStrictEqual(provider.getComparisonDiagnostics().map(view => view.showChanges),
@@ -340,6 +347,17 @@ suite('Native VS Code Git diff integration', function () {
             }
             assert.strictEqual((messages[1].at(-1) as { toggleRequest?: number }).toggleRequest, 1,
                 'The clicking viewer receives an acknowledgement of its request.');
+            refreshVisible();
+            assert.ok(provider.getComparisonDiagnostics().some(view => view.loading));
+            emitters[1].fire({ type: 'spriteMode', enabled: false, request: 1 });
+            assert.ok(latestSpriteModes().every(message => message?.enabled === false),
+                'Layout sync is immediate even while files are being re-read.');
+            assert.strictEqual(latestSpriteModes()[1]?.request, 1);
+            await settled();
+            assert.ok(latestSpriteModes().every(message => message?.enabled === false));
+            emitters[1].fire({ type: 'spriteMode', enabled: 'invalid' });
+            assert.strictEqual(stored.get('nes-chr-diff-viewer.spriteMode'), false);
+            emitters[0].fire({ type: 'spriteMode', enabled: true, request: 2 });
             emitters[0].fire({ type: 'showChanges', enabled: 'invalid' });
             assert.ok(provider.getComparisonDiagnostics().every(view => !view.showChanges));
 
@@ -352,6 +370,7 @@ suite('Native VS Code Git diff integration', function () {
             await settled();
             assert.deepStrictEqual(provider.getComparisonDiagnostics().map(view => view.showChanges),
                 [true, true, true, true], 'A newly opened diff starts with the remembered preference.');
+            assert.ok(latestSpriteModes().every(message => message?.enabled === true), 'New viewers inherit 8x16 mode.');
 
             panels[1].dispose();
             emitters[0].fire({ type: 'showChanges', enabled: false });
@@ -373,6 +392,7 @@ suite('Native VS Code Git diff integration', function () {
             await settled();
             assert.ok(provider.getComparisonDiagnostics().every(view => view.showChanges),
                 'The preference survives an extension restart.');
+            assert.ok(latestSpriteModes().every(message => message?.enabled === true), '8x16 mode survives an extension restart.');
         } finally {
             panels.forEach(panel => panel.dispose());
             emitters.forEach(emitter => emitter.dispose());

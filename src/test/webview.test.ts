@@ -72,6 +72,7 @@ suite('Actual webview rendering script', () => {
             const fitButton = makeButton();
             const fillButton = makeButton();
             const settingsButton = makeButton();
+            const spriteButton = makeButton();
             const cssVariables = new Map<string, string>();
             const windowEvents = new Map<string, Handler>();
             let toggleChanged: (() => void) | undefined;
@@ -86,7 +87,7 @@ suite('Actual webview rendering script', () => {
                     getElementById: (id: string) => ({
                         chrCanvas: canvas, comparisonStatus: status, showChanges: toggle,
                         showChangesLabel: toggleLabel, viewport, zoomFit: fitButton, zoomFill: fillButton,
-                        openSettings: settingsButton
+                        openSettings: settingsButton, view8x16: spriteButton
                     } as Record<string, unknown>)[id],
                     documentElement: { style: { setProperty: (name: string, value: string) => cssVariables.set(name, value) } }
                 },
@@ -150,6 +151,41 @@ suite('Actual webview rendering script', () => {
             assert.strictEqual(painted.get('16,0'), GREY_PALETTE[0]);
             assert.strictEqual(painted.get('32,0'), CHANGED_PALETTE[1]);
             assert.strictEqual([...painted.values()].filter(color => CHANGED_PALETTE.includes(color)).length, 5);
+
+            spriteButton.click();
+            assert.strictEqual(JSON.stringify(messages.pop()), JSON.stringify({ type: 'spriteMode', enabled: true, request: 1 }));
+            send({ type: 'spriteMode', enabled: false, request: 0 });
+            assert.ok(spriteButton.classes.has('active'));
+            assert.strictEqual(spriteButton.attributes.get('aria-pressed'), 'true');
+            send({ type: 'spriteMode', enabled: true, request: 1 });
+            assert.strictEqual(painted.get('0,32'), CHANGED_PALETTE[1], 'Odd tile is the bottom half of the sprite.');
+            assert.strictEqual(painted.get('32,0'), GREY_PALETTE[0], 'The next sprite starts with tile 2, not tile 1.');
+            assert.strictEqual(painted.get('0,0'), CHANGED_PALETTE[3]);
+            assert.strictEqual([...painted.values()].filter(color => CHANGED_PALETTE.includes(color)).length, 5,
+                'Highlighting follows source pixels rather than rearranged display coordinates.');
+            assert.strictEqual(canvas.width, 512);
+            assert.strictEqual(canvas.height, 1024);
+            assert.ok(fitButton.classes.has('active'), 'Changing layout preserves zoom mode.');
+            const spriteFixture = new Uint8Array(8192);
+            for (const tile of [15, 16, 31, 32, 255, 256, 511]) {
+                spriteFixture[tile * 16] = 128;
+            }
+            send({ type: 'comparison', data: Array.from(spriteFixture), mask: [], available: false, status: 'Preview' });
+            for (const [x, y] of [[224, 32], [256, 0], [480, 32], [0, 64], [480, 480], [0, 512], [480, 992]]) {
+                assert.strictEqual(painted.get(`${x},${y}`), GREY_PALETTE[1],
+                    'Pairs are row-major, with separate 4 KB pattern tables and the final odd tile at the bottom.');
+            }
+            spriteButton.click();
+            assert.strictEqual(JSON.stringify(messages.pop()), JSON.stringify({ type: 'spriteMode', enabled: false, request: 2 }));
+            assert.ok(!spriteButton.classes.has('active'));
+            assert.strictEqual(spriteButton.attributes.get('aria-pressed'), 'false');
+            assert.strictEqual(painted.get('480,0'), GREY_PALETTE[1], '8x8 view restores the source tile order.');
+            assert.strictEqual(painted.get('0,32'), GREY_PALETTE[1]);
+            send({ type: 'spriteMode', enabled: true, request: 2 });
+            assert.ok(spriteButton.classes.has('active'), 'The partner toggle updates this viewer.');
+            assert.strictEqual(painted.get('224,32'), GREY_PALETTE[1], 'A host layout message repaints the tiles.');
+            send({ type: 'spriteMode', enabled: false, request: 2 });
+            send({ ...comparisonMessage, data: Array.from(original), showChanges: true, toggleRequest: 1 });
 
             send({ ...comparisonMessage, showChanges: true, toggleRequest: 1, data: Array.from(modified) });
             assert.strictEqual(painted.get('0,0'), CHANGED_PALETTE[0], 'Changes to black remain visibly green.');

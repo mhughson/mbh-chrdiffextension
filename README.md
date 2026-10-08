@@ -5,6 +5,7 @@ NES CHR Diff Viewer is a Visual Studio Code extension that provides a visual pre
 ## Features
 
 - Visual preview for `*.chr` files rendered as NES tiles using a grayscale palette.
+- 8x16 sprite view toggle: stacks consecutive even/odd tiles as top/bottom halves, with 16 sprites per row and separate 4 KB pattern tables. The mode is synchronized across viewers and remembered between sessions.
 - Side-by-side diff view for CHR files in Source Control (shows before and after states).
 - Diff Highlight: shows areas of CHR file that have changed.
 - Live update: the viewer refreshes when the underlying file changes on disk.

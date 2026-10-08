@@ -17,6 +17,7 @@ class NESChrDocument implements vscode.CustomDocument {
 }
 
 const SHOW_CHANGES_KEY = 'nes-chr-diff-viewer.showChanges';
+const SPRITE_MODE_KEY = 'nes-chr-diff-viewer.spriteMode';
 
 interface Viewer {
     id: number;
@@ -35,6 +36,7 @@ interface Viewer {
     lastVisible: boolean;
     lastColumn: number | undefined;
     toggleRequest: number;
+    spriteRequest: number;
     subscriptions: vscode.Disposable[];
 }
 
@@ -49,11 +51,13 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
     private nextId = 1;
     // One preference shared by every diff, so it carries over as the user moves between files.
     private showChanges: boolean;
+    private spriteMode: boolean;
     private outputChannel?: vscode.OutputChannel;
     private readonly configSubscription: vscode.Disposable;
 
     constructor(private readonly preferences?: vscode.Memento) {
         this.showChanges = preferences?.get<boolean>(SHOW_CHANGES_KEY) === true;
+        this.spriteMode = preferences?.get<boolean>(SPRITE_MODE_KEY) === true;
         this.configSubscription = vscode.workspace.onDidChangeConfiguration(event => {
             if (event.affectsConfiguration(CONFIG_SECTION)) {
                 for (const view of this.viewers.values()) {
@@ -71,6 +75,12 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
 
     private postPalettes(view: Viewer): void {
         void view.panel.webview.postMessage({ type: 'palette', ...this.palettes });
+    }
+
+    private postSpriteMode(view: Viewer): void {
+        void view.panel.webview.postMessage({
+            type: 'spriteMode', enabled: this.spriteMode, request: view.spriteRequest
+        });
     }
 
     private get output(): vscode.OutputChannel {
@@ -214,7 +224,7 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
             loading: false, generation: 0, status: 'Preview: waiting for viewer.',
             changedPixels: 0, showChanges: false, dataPending: false,
             displayed: false, lastVisible: webviewPanel.visible, lastColumn: webviewPanel.viewColumn,
-                        toggleRequest: 0, subscriptions: []
+                        toggleRequest: 0, spriteRequest: 0, subscriptions: []
         };
         this.viewers.set(view.id, view);
         view.subscriptions.push(
@@ -228,9 +238,22 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
                     view.displayed = false;
                     // Settings may have changed between building the HTML and the script running.
                     this.postPalettes(view);
+                    view.spriteRequest = 0;
+                    this.postSpriteMode(view);
                     await this.refreshVisible();
                 } else if (msg.type === 'openSettings') {
                     await vscode.commands.executeCommand('workbench.action.openSettings', `${CONFIG_SECTION}.`);
+                } else if (msg.type === 'spriteMode' && 'enabled' in msg && typeof msg.enabled === 'boolean') {
+                    if ('request' in msg && typeof msg.request === 'number' && msg.request > view.spriteRequest) {
+                        view.spriteRequest = msg.request;
+                    }
+                    this.spriteMode = msg.enabled;
+                    void this.preferences?.update(SPRITE_MODE_KEY, msg.enabled);
+                    for (const other of this.viewers.values()) {
+                        if (other.ready) {
+                            this.postSpriteMode(other);
+                        }
+                    }
                 } else if (msg.type === 'showChanges' && 'enabled' in msg && typeof msg.enabled === 'boolean') {
                     // Check the live pairing rather than view.partner, which may be
                     // briefly unset while either side is re-reading its file.
@@ -370,6 +393,9 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
                         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
                     </button>
                     <span class="separator" aria-hidden="true"></span>
+                    <button id="view8x16" class="icon-button" title="8x16 sprite view" aria-label="8x16 sprite view" aria-pressed="false">
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 1.5h7v13h-7zM4.5 8h7" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+                    </button>
                     <label id="showChangesLabel" class="icon-button toggle" title="Show changes" hidden>
                         <input id="showChanges" type="checkbox" disabled aria-label="Show changes">
                         <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.75" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 2.25a5.75 5.75 0 0 0 0 11.5z"/></svg>
@@ -395,6 +421,15 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
                     const viewport = document.getElementById('viewport');
                     const fitButton = document.getElementById('zoomFit');
                     const fillButton = document.getElementById('zoomFill');
+                    const spriteButton = document.getElementById('view8x16');
+                    let spriteMode = false;
+                    let spriteRequest = 0;
+                    function setSpriteMode(enabled) {
+                        spriteMode = enabled;
+                        spriteButton.classList.toggle('active', enabled);
+                        spriteButton.setAttribute('aria-pressed', String(enabled));
+                        drawCHR();
+                    }
                     // The toolbar is icon-only; the status lives in the toggle's tooltip and
                     // in a visually hidden live region for screen readers.
                     function setStatus(text) {
@@ -474,16 +509,19 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
                             for (let tileX = 0; tileX < 16; tileX++) {
                                 const tileIndex = tileY * 16 + tileX;
                                 const tileOffset = tileIndex * 16;
+                                const spriteIndex = Math.floor(tileIndex / 2);
+                                const displayX = spriteMode ? (spriteIndex % 16) * 8 : tileX * 8;
+                                const displayY = spriteMode ? Math.floor(spriteIndex / 16) * 16 + (tileIndex % 2) * 8 : tileY * 8;
                                 for (let row = 0; row < 8; row++) {
                                     const plane0 = chr[tileOffset + row] || 0;
                                     const plane1 = chr[tileOffset + row + 8] || 0;
-                                    const y = tileY * 8 + row;
+                                    const y = displayY + row;
                                     for (let col = 0; col < 8; col++) {
                                         const bit0 = (plane0 >> (7 - col)) & 1;
                                         const bit1 = (plane1 >> (7 - col)) & 1;
                                         const colorIndex = (bit1 << 1) | bit0;
-                                        const x = tileX * 8 + col;
-                                        const pixel = y * 128 + x;
+                                        const x = displayX + col;
+                                        const pixel = (tileY * 8 + row) * 128 + tileX * 8 + col;
                                         ctx.fillStyle = (showChanges && changedMask[pixel] ? changedPalette : nesPalette)[colorIndex];
                                         ctx.fillRect(edges[x], edges[y], edges[x + 1] - edges[x], edges[y + 1] - edges[y]);
                                     }
@@ -516,6 +554,10 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
                         } else if (msg.type === 'palette') {
                             applyPalettes(msg.palette, msg.changedPalette);
                             drawCHR();
+                        } else if (msg.type === 'spriteMode') {
+                            if ((msg.request || 0) >= spriteRequest) {
+                                setSpriteMode(msg.enabled);
+                            }
                         } else if (msg.type === 'error' || msg.type === 'deleted') {
                             chr.fill(0);
                             hasData = false;
@@ -536,6 +578,10 @@ export class NESChrDiffProvider implements vscode.CustomReadonlyEditorProvider<N
                     });
                     fitButton.addEventListener('click', () => setZoomMode('fit'));
                     fillButton.addEventListener('click', () => setZoomMode('fill'));
+                    spriteButton.addEventListener('click', () => {
+                        setSpriteMode(!spriteMode);
+                        vscode.postMessage({ type: 'spriteMode', enabled: spriteMode, request: ++spriteRequest });
+                    });
                     document.getElementById('openSettings').addEventListener('click', () => {
                         vscode.postMessage({ type: 'openSettings' });
                     });
